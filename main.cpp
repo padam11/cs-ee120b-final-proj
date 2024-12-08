@@ -78,7 +78,7 @@ void playSong() {
 // Exercise 1: 3 tasks
 // Exercise 2: 5 tasks
 // Exercise 3: 7 tasks
-#define NUM_TASKS 3
+#define NUM_TASKS 4
 
 
 //Task struct for concurrent synchSMs implmentations
@@ -98,15 +98,33 @@ typedef struct {
     uint8_t red;
     uint8_t green;
     uint8_t blue;
+
+    uint8_t bounce_left;
+    uint8_t bounce_right;
+    uint8_t bounce_top;
+    uint8_t bounce_bottom;
+    
 } Dot;
+
+typedef struct {
+    uint8_t start_col;
+    uint8_t end_col;
+    uint8_t start_row;
+    uint8_t end_row;
+} Wall;
+
+#define MAX_WALLS 10
+Wall walls[MAX_WALLS];
+uint8_t num_walls = 0;
 
 
 //TODO: Define Periods for each task
 // e.g. const unsined long TASK1_PERIOD = <PERIOD>
 const unsigned long GCD_PERIOD = /* TODO: Calulate GCD of tasks */ 1; //make 0 for testing
-const unsigned long JOYSTICK_PERIOD = 5;
+const unsigned long JOYSTICK_PERIOD = 3;
 const unsigned long SCREEN_PERIOD = 1;
 const unsigned long GREENDOT_PERIOD =  5;
+const unsigned long BUTTON_PERIOD = 100;
 
 task tasks[NUM_TASKS]; // declared task array with NUM_TASKS amount of tasks
 Dot dots[MAX_DOTS]; //array of dots
@@ -118,9 +136,14 @@ uint8_t numDots = 0; //number of active dots
 
 enum Joystick_States {JOYSTICK_IDLE, JOYSTICK_READ };
 enum Screen_States {SCREEN_UPDATE};
+enum DotTask_States { DOTS_MOVE };
+enum ButtonHandler_States { OFF, PRESS, ON, PRESS2};
+enum Game_States {OFF1, HOME_SCREEN, GAME1, GAME2};
 
-
-
+unsigned char systemOn = 0;
+unsigned char gameOn = 0;
+unsigned char gameWon = 0;
+unsigned int numFails = 0;
 void TimerISR() {
     
     //TODO: sample inputs here
@@ -247,6 +270,30 @@ void black_screen()
         Send_Data(0);
     }
 }
+
+void fill_screen(uint8_t start_col, uint8_t end_col, uint8_t start_row, uint8_t end_row, uint8_t red, uint8_t green, uint8_t blue)
+{
+    Send_Command(0x2A);
+    Send_Data(0);
+    Send_Data(start_col);
+    Send_Data(0);
+    Send_Data(end_col);
+
+    Send_Command(0x2B);
+    Send_Data(0);
+    Send_Data(start_row);
+    Send_Data(0);
+    Send_Data(end_row);
+
+    Send_Command(0x2C);
+    for (uint16_t row = start_row; row <= end_row; ++row) {
+        for (uint16_t col = start_col; col <= end_col; ++col) {
+            Send_Data(red);   // Red value
+            Send_Data(green); // Green value
+            Send_Data(blue);  // Blue value
+        }
+    }
+}
 //128x128
 void create_sprite(uint8_t cx, uint8_t cy, uint8_t r, uint8_t blue, uint8_t green, uint8_t red)
 {
@@ -258,18 +305,18 @@ void create_sprite(uint8_t cx, uint8_t cy, uint8_t r, uint8_t blue, uint8_t gree
     uint8_t y_end = (cy + r < 128) ? (cy + r) : 127;
 
     // Set the column address (x range)
-    Send_Command(0x2A); // Column address set
-    Send_Data(0);       // High byte of x_start
-    Send_Data(x_start); // Low byte of x_start
-    Send_Data(0);       // High byte of x_end
-    Send_Data(x_end);   // Low byte of x_end
+    Send_Command(0x2A); 
+    Send_Data(0);      
+    Send_Data(x_start); 
+    Send_Data(0);      
+    Send_Data(x_end);   
 
     // Set the row address (y range)
-    Send_Command(0x2B); // Row address set
-    Send_Data(0);       // High byte of y_start
-    Send_Data(y_start); // Low byte of y_start
-    Send_Data(0);       // High byte of y_end
-    Send_Data(y_end);   // Low byte of y_end
+    Send_Command(0x2B); 
+    Send_Data(0);       
+    Send_Data(y_start); 
+    Send_Data(0);       
+    Send_Data(y_end);   
 
     // Begin writing pixel data
     Send_Command(0x2C); // Memory write
@@ -301,8 +348,8 @@ void create_sprite(uint8_t cx, uint8_t cy, uint8_t r, uint8_t blue, uint8_t gree
     }
 }
 
-volatile uint8_t cx = 64; //moveable character
-volatile uint8_t cy = 64;
+volatile uint8_t cx = 6; //moveable character
+volatile uint8_t cy = 100;
 volatile uint8_t radius = 5;
 
 volatile uint8_t green_x = 64; //evil sprite
@@ -323,6 +370,9 @@ int Screen_Tick(int state)
             //state = SCREEN_UPDATE;
             for (uint8_t i = 0; i < numDots; i++) //create each evil dot sprite
             {
+                create_sprite(dots[i].x - dots[i].dx, dots[i].y - dots[i].dy, 
+                            dots[i].radius, 0, 0, 0);
+
                 create_sprite(dots[i].x, dots[i].y, dots[i].radius, dots[i].red,
                 dots[i].green, dots[i].blue); 
             }
@@ -335,13 +385,28 @@ int Screen_Tick(int state)
     return state;
 }
 
+uint8_t check_collision(uint8_t cx, uint8_t cy, uint8_t radius) {
+    for (uint8_t i = 0; i < num_walls; i++) {
+        if (cx + radius >= walls[i].start_col && cx - radius <= walls[i].end_col &&
+            cy + radius >= walls[i].start_row && cy - radius <= walls[i].end_row) {
+            return 1; // Collision detected
+        }
+    }
+    return 0; // No collision
+}
+
 int Joystick_Tick(int state)
 {
     static uint16_t adc_x, adc_y;
+    uint8_t new_cx = cx;
+    uint8_t new_cy = cy;
 
     switch (state) {
         case JOYSTICK_IDLE:
-            state = JOYSTICK_READ;
+            if (gameOn)
+            {
+                state = JOYSTICK_READ;
+            }
             break;
         case JOYSTICK_READ:
             adc_y = ADC_read(0);
@@ -349,19 +414,24 @@ int Joystick_Tick(int state)
 
             if (adc_x > 550 && cx < 127)
             {
-                cx++; //move right
+                new_cx++; //move right
             }
             if (adc_x < 470 && cx > 0)
             {
-                cx--; //move left
+                new_cx--; //move left
             }
             if (adc_y > 550 && cy > 0)
             {
-                cy--; //move up
+                new_cy--; //move up
             }
             if (adc_y < 470 && cy < 127)
             {
-                cy++; //move down
+                new_cy++; //move down
+            }
+            if (!check_collision(new_cx, new_cy, radius))
+            {
+                cx = new_cx;
+                cy = new_cy; //applies new coordinates to original variable if no wall
             }
             state = JOYSTICK_IDLE;
             break;
@@ -374,7 +444,9 @@ int Joystick_Tick(int state)
 
 
 void init_dot(uint8_t index, uint8_t x, uint8_t y, int8_t dx, int8_t dy, 
-              uint8_t radius, uint8_t red, uint8_t green, uint8_t blue)
+              uint8_t radius, uint8_t red, uint8_t green, uint8_t blue,
+              uint8_t bounce_left, uint8_t bounce_right, uint8_t bounce_top,
+              uint8_t bounce_bottom)
     {
         if (index >= MAX_DOTS) return; // Prevent out-of-bounds access
 
@@ -386,36 +458,53 @@ void init_dot(uint8_t index, uint8_t x, uint8_t y, int8_t dx, int8_t dy,
         dots[index].red = red;
         dots[index].green = green;
         dots[index].blue = blue;
+
+        dots[index].bounce_left = bounce_left;
+        dots[index].bounce_right = bounce_right;
+        dots[index].bounce_top = bounce_top;
+        dots[index].bounce_bottom = bounce_bottom;
+        
     }
 
-enum DotTask_States { DOTS_MOVE };
+void add_wall(uint8_t start_col, uint8_t end_col, uint8_t start_row, uint8_t end_row)
+{
+    if (num_walls >= MAX_WALLS) return;
+    walls[num_walls].start_col = start_col;
+    walls[num_walls].end_col = end_col;
+    walls[num_walls].start_row = start_row;
+    walls[num_walls].end_row = end_row;
+    num_walls++;
+}
+
+
+
 int Dots_Tick(int state)
 {
     switch(state) {
         case DOTS_MOVE:
-            for (uint8_t i = 0; i < numDots; i++)
-            {
-                dots[i].x += dots[i].dx;
-                dots[i].y += dots[i].dy; //update positions
-                
-                //check horizontal wall collisions
-                if (dots[i].x <= dots[i].radius)
+            if (gameOn) {
+                for (uint8_t i = 0; i < numDots; i++)
                 {
-                    dots[i].dx = 1; //bounce right
-                }
-                if (dots[i].x >= 127 - dots[i].radius)
-                {
-                    dots[i].dx = -1; //bounce left
-                }
+                    dots[i].x += dots[i].dx;
+                    dots[i].y += dots[i].dy; //update positions
+                    
+                    //check horizontal wall collisions
+                   
+                    if (dots[i].x < dots[i].bounce_left + dots[i].radius) {
+                        
+                        dots[i].dx = abs(dots[i].dx); // Bounce right. change to abs var instead of 1 because we can also use it to modify the speed too, important when theres a ton of dots.
+                    }
+                    if (dots[i].x > dots[i].bounce_right - dots[i].radius) {
+                        dots[i].dx = -abs(dots[i].dx); // Bounce left
+                    }
 
-                //check vertical
-                if (dots[i].y <= dots[i].radius)
-                {
-                    dots[i].dy = 1; //bounce down
-                }
-                if (dots[i].y >= 127 - dots[i].radius)
-                {
-                    dots[i].dy = -1; //bounce up
+                    // Check vertical boundaries
+                    if (dots[i].y <= dots[i].bounce_top + dots[i].radius) {
+                        dots[i].dy = abs(dots[i].dy); // Bounce down
+                    }
+                    if (dots[i].y >= dots[i].bounce_bottom - dots[i].radius) {
+                        dots[i].dy = -abs(dots[i].dy); // Bounce up
+                    }
                 }
             }
             break;
@@ -428,7 +517,204 @@ int Dots_Tick(int state)
 }
 
 
+int ButtonHandler_Tick(int state)
+{
+    switch(state)
+    {
+        case OFF:
+            if (GetBit(PINC, PC4) == 1)
+            {
+                state = PRESS;
+                
+            }
+            break;
+        case PRESS:
+            if (GetBit(PINC, PC4) == 0)
+            {
+                state = ON;
+                systemOn = 1;
+            }
+            break;
+        case ON:
+            if (GetBit(PINC, PC4) == 1)
+            {
+                state = PRESS2;
+            }
+            break;
+        case PRESS2:
+            if (GetBit(PINC, PC4) == 0)
+            {
+                state = OFF;
+                systemOn = 0;
+            }
+            break;
+        default:
+            state = OFF;
+            break;
+    }
+    return state;
+}
 
+int Game_Tick(int state)
+{
+    switch(state)
+    {
+        case OFF1:
+            state = HOME_SCREEN;
+            ST7735_Init();
+            
+            
+            break;
+        case HOME_SCREEN:
+            if (systemOn)
+            {
+                state = GAME1;
+                gameOn = 1;
+                cx = 6;
+                cy = 100;
+                init_dot(0, 64, 64, -1, 0, 5, 0, 255, 0, 31, 100, 0, 115);
+                init_dot(1, 82, 82, 1, 0, 5, 0, 255, 0, 31, 100, 0, 115); 
+                fill_screen(16, 31, 0, 115, 0, 0, 250); //red
+                fill_screen(50, 130, 115, 130, 0, 0, 250); //red
+                fill_screen(100, 115, 15, 116, 0, 0, 250); //red
+                fill_screen(16, 49, 116, 130, 0, 0, 0); //black
+                fill_screen(0, 15, 0, 130, 0, 0, 0); //black
+                fill_screen(31, 100, 0, 115, 0, 0, 0); //black
+                fill_screen(101, 115, 0, 14, 0, 0, 0); //black
+                fill_screen(116, 130, 0, 115, 0, 0, 0); //black
+                add_wall(16, 31, 0, 115);
+                add_wall(50, 130, 115, 130);
+                add_wall(100, 114, 15, 116); //red are the only walls.
+                numDots = 2;
+                
+            }
+            
+            //add title
+            break;
+        case GAME1: //SCREEN_UPDATE
+            
+            create_sprite(cx, cy, radius, 0, 0, 255); //moveable sprite
+            
+            //setting create sprite with cx and cy will only create a moveable sprite
+            //create_sprite(green_x - green_dx, green_y, green_radius, 0, 0, 0); 
+            //create_sprite(green_x, green_y, green_radius, 0, 255, 0); //evil sprite
+            for (uint8_t i = 0; i < numDots; i++) //create each evil dot sprite
+            {
+                create_sprite(dots[i].x - dots[i].dx, dots[i].y - dots[i].dy, 
+                            dots[i].radius, 0, 0, 0);
+
+                create_sprite(dots[i].x, dots[i].y, dots[i].radius, dots[i].red,
+                dots[i].green, dots[i].blue); 
+
+                uint16_t dx = cx - dots[i].x;
+                uint16_t dy = cy - dots[i].y;
+                uint16_t distance_squared = dx * dx + dy * dy;
+
+                if (distance_squared <= ((dots[i].radius+5) * (dots[i].radius+5)))
+                {
+                    gameOn = 0;
+                    state = HOME_SCREEN;
+                    numFails++;
+                }
+
+                /*if (GetBit(PINC, PC2) == 1)
+                {
+                    gameOn = 0;
+                    state = HOME_SCREEN;
+                }*/
+                
+            }
+            if (cx >= 114 && cy <= 14)
+                {
+                    state = GAME2;
+                    //gameOn = 1;
+                    num_walls = 0;
+                    cx = 64;
+                    cy = 125;
+                    init_dot(0, 64, 77, -2, 0, 5, 0, 255, 0, 0, 130, 0, 115);
+                    init_dot(1, 64, 92, 2, 0, 5, 0, 255, 0, 0, 130, 0, 115);
+                    init_dot(2, 64, 62, 2, 0, 5, 0, 255, 0, 0, 130, 0, 115); //vert doesnt matter if dy is 0 anyway
+                    init_dot(3, 64, 47, -2, 0, 5, 0, 255, 0, 0, 130, 0, 115); //more dots = more speed
+                    fill_screen(0, 49, 100, 115, 0, 0, 250); //red
+                    fill_screen(80, 130, 100, 115, 0, 0, 250); //red
+                    fill_screen(0, 49, 15, 30, 0, 0, 250); //red
+                    fill_screen(80, 130, 15, 30, 0, 0, 250); //red
+                    fill_screen(0, 130, 0, 15, 0, 0, 0); //black
+                    fill_screen(49, 80, 15, 30, 0, 0, 0); //black
+                    fill_screen(0, 130, 30, 100, 0, 0, 0); //black
+                    fill_screen(49, 80, 100, 115, 0, 0, 0); //black
+                    fill_screen(0, 130, 115, 130, 0, 0, 0);
+                    add_wall(0, 49, 100, 115);
+                    add_wall(80, 130, 100, 115);
+                    add_wall(0, 49, 15, 30); //red are the only walls.
+                    add_wall(80, 130, 15, 30);
+                    
+                    numDots = 4;
+
+                }
+            if (!systemOn)
+            {
+                state = OFF1;
+                ST7735_Init();
+                
+            }
+            break;
+            //game related work, sprites, and check if game has been won
+        case GAME2:
+            //HardwareReset();
+            create_sprite(cx, cy, radius, 0, 0, 255); //moveable sprite
+            
+            for (uint8_t i = 0; i < numDots; i++) //create each evil dot sprite
+            {
+                create_sprite(dots[i].x - dots[i].dx, dots[i].y - dots[i].dy, 
+                            dots[i].radius, 0, 0, 0);
+
+                create_sprite(dots[i].x, dots[i].y, dots[i].radius, dots[i].red,
+                dots[i].green, dots[i].blue); 
+
+                uint16_t dx = cx - dots[i].x;
+                uint16_t dy = cy - dots[i].y;
+                uint16_t distance_squared = dx * dx + dy * dy;
+
+                if (distance_squared <= ((dots[i].radius+5) * (dots[i].radius+5)))
+                {
+                    gameOn = 0;
+                    state = HOME_SCREEN;
+                    numFails++;
+                }
+
+                /*if (GetBit(PINC, PC2) == 1)
+                {
+                    gameOn = 0;
+                    state = HOME_SCREEN;
+                }*/
+                
+            }
+            if (cx >= 114 && cy <= 14)
+                {
+                    state = GAME2;
+                    num_walls = 0;
+                    fill_screen(0, 130, 0, 130, 0, 0, 0);
+                    init_dot(0, 64, 64, -1, 0, 5, 0, 255, 0, 31, 100, 0, 115);
+                    init_dot(1, 82, 82, 1, 0, 5, 0, 255, 0, 31, 100, 0, 115);
+                    numDots = 2;
+
+                }
+            if (!systemOn)
+            {
+                state = OFF1;
+                ST7735_Init();
+                
+            }
+            
+            break;
+        default:
+            state = OFF1;
+            break;
+        
+    }
+    return state;
+}
 
 int main(void) {
     //TODO: initialize all your inputs and ouputs
@@ -439,12 +725,13 @@ int main(void) {
     DDRB = 0xFF; PORTB = 0x00;
     DDRD = 0xFF; PORTD = 0x00;
     serial_init(9600);
+    
 
     //TCCR1A = (1 << COM1A0); 
     //TCCR1B = (1 << WGM12);  
     //DDRB |= (1 << PB1);    
     //WGM11, WGM12, WGM13 set timer to fast pwm mode
-
+    
     ICR1 = 39999; //20ms pwm period
     //DDRD |= (1 << PD6); // Set D6 as output
     //TODO: Initialize tasks here
@@ -452,32 +739,41 @@ int main(void) {
     // tasks[0].state = ...
     // tasks[0].elapsedTime = ...
     // tasks[0].TickFct = &task1_tick_function;
-    ST7735_Init();
+    //ST7735_Init();
     
 
     //DrawRectangle(10, 20, 50, 50, 0xF800); // RGB565 for red color
     //DrawSprite(10, 10, 5, 5, sprite, 0xF800);
-    black_screen();
+    //black_screen();
     //create_sprite(64, 64, 30);
     //playSong();
 
-    init_dot(0, 64, 64, -1, 0, 5, 0, 255, 0);
-    init_dot(1, 64, 64, 0, 1, 5, 0, 0, 255);
-    numDots = 2;
+    
     tasks[0].state = JOYSTICK_IDLE;
     tasks[0].period = JOYSTICK_PERIOD;
     tasks[0].elapsedTime = 0;
     tasks[0].TickFct = &Joystick_Tick;
 
-    tasks[1].state = SCREEN_UPDATE;
+    /*tasks[1].state = SCREEN_UPDATE;
     tasks[1].period = SCREEN_PERIOD;
     tasks[1].elapsedTime = 0;
-    tasks[1].TickFct = &Screen_Tick;
+    tasks[1].TickFct = &Screen_Tick;*/
+
+    tasks[1].state = OFF1;
+    tasks[1].period = SCREEN_PERIOD;
+    tasks[1].elapsedTime = 0;
+    tasks[1].TickFct = &Game_Tick;
+
 
     tasks[2].state = DOTS_MOVE;
     tasks[2].period = GREENDOT_PERIOD;
     tasks[2].elapsedTime = 0;
     tasks[2].TickFct = &Dots_Tick;
+
+    tasks[3].state = OFF;
+    tasks[3].period = BUTTON_PERIOD;
+    tasks[3].elapsedTime = 0;
+    tasks[3].TickFct = &ButtonHandler_Tick;
 
     TimerSet(GCD_PERIOD);
     TimerOn();
