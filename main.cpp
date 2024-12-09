@@ -1,4 +1,3 @@
-
 #include "timerISR.h"
 #include "helper.h"
 #include "periph.h"
@@ -8,6 +7,7 @@
 #include <stdlib.h>
 #include <serialATmega.h>
 
+decode_results results;
 
 #define NOTE_C4  262
 #define NOTE_D4  294
@@ -20,6 +20,11 @@
 #define NOTE_REST 0
 
 #define MAX_DOTS 10
+
+#define IR_MOVE_UP 0x95D8CE79
+#define IR_MOVE_LEFT 0x44C4AB3
+#define IR_MOVE_DOWN 0xB5F78E8
+#define IR_MOVE_RIGHT 0x2318F92C
 
 const uint16_t song[] PROGMEM = {
     NOTE_C4,
@@ -78,7 +83,7 @@ void playSong() {
 // Exercise 1: 3 tasks
 // Exercise 2: 5 tasks
 // Exercise 3: 7 tasks
-#define NUM_TASKS 4
+#define NUM_TASKS 5
 
 
 //Task struct for concurrent synchSMs implmentations
@@ -125,6 +130,7 @@ const unsigned long JOYSTICK_PERIOD = 3;
 const unsigned long SCREEN_PERIOD = 1;
 const unsigned long GREENDOT_PERIOD =  5;
 const unsigned long BUTTON_PERIOD = 100;
+const unsigned long IR_PERIOD = 500;
 
 task tasks[NUM_TASKS]; // declared task array with NUM_TASKS amount of tasks
 Dot dots[MAX_DOTS]; //array of dots
@@ -139,6 +145,7 @@ enum Screen_States {SCREEN_UPDATE};
 enum DotTask_States { DOTS_MOVE };
 enum ButtonHandler_States { OFF, PRESS, ON, PRESS2};
 enum Game_States {OFF1, HOME_SCREEN, GAME1, GAME1END, GAME2, END};
+enum IR_States { IR_IDLE, IR_DECODE};
 
 unsigned char systemOn = 0;
 unsigned char gameOn = 0;
@@ -395,11 +402,46 @@ uint8_t check_collision(uint8_t cx, uint8_t cy, uint8_t radius) {
     return 0; // No collision
 }
 
+volatile uint32_t irCommand = 0;
+volatile bool irNewCommand = false;
+
+int IR_Tick(int state)
+{
+    
+    switch(state)
+    {
+        case IR_IDLE:
+            if (IRdecode(&results))
+            {
+                //serial_println(results.value);
+                irCommand = results.value;
+                irNewCommand = true;
+                //IRresume();
+                if (results.value == 16718055) // '2'
+                {
+                    systemOn = !systemOn;
+                }
+            }
+            state = IR_DECODE;
+            break;
+        case IR_DECODE:
+            IRresume();
+            state = IR_IDLE;
+            break;
+        default:
+            state = IR_IDLE;
+            break;
+    }
+    return state;
+}
+
 int Joystick_Tick(int state)
 {
     static uint16_t adc_x, adc_y;
     int new_cx = cx;
     int new_cy = cy;
+
+    
 
     switch (state) {
         case JOYSTICK_IDLE:
@@ -409,6 +451,7 @@ int Joystick_Tick(int state)
             }
             break;
         case JOYSTICK_READ:
+            
             adc_y = ADC_read(0);
             adc_x = ADC_read(1);
 
@@ -428,6 +471,34 @@ int Joystick_Tick(int state)
             {
                 new_cy++; //move down
             }
+
+            
+            
+
+            /*if (irNewCommand)
+            {
+                
+                switch (irCommand)
+                {
+                    case 0xF708FF00: //left
+                        if (cx > 0) new_cx--;
+                        break;
+                    case 0xA55AFF00: //right
+                        if (cx < 127) new_cx++;
+                        break;
+                    case 16718055: //up
+                        if (cy > 0) new_cy--;
+                        break;
+                    case 0xAD52FF00: //down
+                        if (cy < 127) new_cy++;
+                        break;
+                    default:
+                        break;
+                }
+                irNewCommand = false;
+            }*/
+            
+
             if (!check_collision(new_cx, new_cy, radius))
             {
                 cx = new_cx;
@@ -625,6 +696,8 @@ int Game_Tick(int state)
                     gameOn = 0;
                     state = HOME_SCREEN;
                 }
+
+                
                 
             }
             if (cx >= 114 && cy <= 14)
@@ -736,10 +809,13 @@ int main(void) {
     ADC_init();   // initializes ADC
     SPI_INIT(); //initializes SPI for LCD communication
     
+    
     DDRB = 0xFF; PORTB = 0x00;
     DDRD = 0xFF; PORTD = 0x00;
     serial_init(9600);
     PORTC = SetBit(PINC, PC2, 1);
+    IRinit(&DDRD, &PIND, 7); // Initialize IR receiver on pin D5
+    IRresume();
 
     //TCCR1A = (1 << COM1A0); 
     //TCCR1B = (1 << WGM12);  
@@ -768,26 +844,31 @@ int main(void) {
     tasks[0].elapsedTime = 0;
     tasks[0].TickFct = &Joystick_Tick;
 
+    tasks[1].state = IR_IDLE;
+    tasks[1].period = IR_PERIOD;
+    tasks[1].elapsedTime = 0;
+    tasks[1].TickFct = &IR_Tick;
+
     /*tasks[1].state = SCREEN_UPDATE;
     tasks[1].period = SCREEN_PERIOD;
     tasks[1].elapsedTime = 0;
     tasks[1].TickFct = &Screen_Tick;*/
 
-    tasks[1].state = OFF1;
-    tasks[1].period = SCREEN_PERIOD;
-    tasks[1].elapsedTime = 0;
-    tasks[1].TickFct = &Game_Tick;
-
-
-    tasks[2].state = DOTS_MOVE;
-    tasks[2].period = GREENDOT_PERIOD;
+    tasks[2].state = OFF1;
+    tasks[2].period = SCREEN_PERIOD;
     tasks[2].elapsedTime = 0;
-    tasks[2].TickFct = &Dots_Tick;
+    tasks[2].TickFct = &Game_Tick;
 
-    tasks[3].state = OFF;
-    tasks[3].period = BUTTON_PERIOD;
+
+    tasks[3].state = DOTS_MOVE;
+    tasks[3].period = GREENDOT_PERIOD;
     tasks[3].elapsedTime = 0;
-    tasks[3].TickFct = &ButtonHandler_Tick;
+    tasks[3].TickFct = &Dots_Tick;
+
+    tasks[4].state = OFF;
+    tasks[4].period = BUTTON_PERIOD;
+    tasks[4].elapsedTime = 0;
+    tasks[4].TickFct = &ButtonHandler_Tick;
 
     TimerSet(GCD_PERIOD);
     TimerOn();
