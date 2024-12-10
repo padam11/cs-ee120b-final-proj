@@ -1,3 +1,4 @@
+
 #include "timerISR.h"
 #include "helper.h"
 #include "periph.h"
@@ -54,7 +55,7 @@ void playNote(uint16_t frequency) {
     
 
     // Enable PWM on PORTD6
-    PORTD = SetBit(PORTD, 6, 1);
+    PORTD = SetBit(PORTB, PB1, 1);
     TCCR1B = (TCCR1B & 0xF8) | 0x02; // Set prescaler to 8
 }
 
@@ -172,14 +173,14 @@ void HardwareReset() {
 }
 
 void Send_Command(uint8_t command) {
-    PORTB = SetBit(PORTB, PB1, 0); // A0 = 0 (command mode)
+    PORTD = SetBit(PORTD, PD6, 0); // A0 = 0 (command mode)
     PORTB = SetBit(PORTB, PB2, 0); // CS = 0 (enable lcd)
     SPI_SEND(command);     //SPI
     PORTB = SetBit(PORTB, PB2, 1); // CS = 1 (diable lcd)
 }
 
 void Send_Data(uint8_t data) {
-    PORTB = SetBit(PORTB, PB1, 1); // A0 = 1 (data mode)
+    PORTD = SetBit(PORTD, PD6, 1); // A0 = 1 (data mode)
     PORTB = SetBit(PORTB, PB2, 0); // CS = 0 (enable lcd)
     SPI_SEND(data);        // SPI
     PORTB = SetBit(PORTB, PB2, 1); // CS = 1 (disable lcd)
@@ -620,6 +621,7 @@ int ButtonHandler_Tick(int state)
             {
                 state = OFF;
                 systemOn = 0;
+                //Send_Command(0x28); //turn off display
             }
             break;
         default:
@@ -710,7 +712,7 @@ int Game_Tick(int state)
             if (!systemOn)
             {
                 state = OFF1;
-                ST7735_Init();
+                Send_Command(0x10); //turn off
                 
             }
             break;
@@ -787,7 +789,7 @@ int Game_Tick(int state)
             if (!systemOn)
             {
                 state = OFF1;
-                ST7735_Init();
+                Send_Command(0x10);
                 
             }
             
@@ -817,9 +819,9 @@ int main(void) {
     IRinit(&DDRD, &PIND, 7); // Initialize IR receiver on pin D5
     IRresume();
 
-    //TCCR1A = (1 << COM1A0); 
-    //TCCR1B = (1 << WGM12);  
-    //DDRB |= (1 << PB1);    
+    TCCR1A = (1 << COM1A0); 
+    TCCR1B = (1 << WGM12);  
+    DDRB |= (1 << PB1);    
     //WGM11, WGM12, WGM13 set timer to fast pwm mode
     
     ICR1 = 39999; //20ms pwm period
